@@ -1,0 +1,5 @@
+This file lists the Python packages required to run the local server.
+The core application runs in the browser using JavaScript libraries.
+Standard Python 3 installation is sufficient, but this explicitly states
+the dependency on the 'http.server' module (which is built-in).
+python-3

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Face Expression Detector</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- k.sudarsan Use a fixed, stable version of face-api.js -->
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .main-card {
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            max-width: 720px;
+        }
+        #webcam-container {
+            position: relative;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            overflow: hidden;
+            /* Ensures the container respects aspect ratio on mobile */
+            width: 100%; 
+            padding-top: 75%; /* 4:3 aspect ratio (480/640 * 100%) */
+        }
+        #video, #overlay-canvas, #static-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; 
+            height: 100%;
+            object-fit: cover; /* Ensures video/image covers the container */
+            border-radius: 8px;
+        }
+        #overlay-canvas {
+            z-index: 20;
+        }
+        .message-box {
+            background-color: #21262d;
+            border: 1px solid #30363d;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-weight: 500;
+        }
+        .control-button {
+            padding: 10px 12px;
+            border-radius: 6px;
+            font-size: 0.875rem; /* text-sm */
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            flex-grow: 1; 
+            min-width: 100px;
+        }
+        .control-button:active {
+            transform: translateY(1px);
+        }
+        .progress-bar-container {
+            height: 8px;
+            background-color: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #58a6ff;
+            transition: width 0.1s;
+        }
+
+        /* Mobile specific layout adjustments */
+        @media (max-width: 640px) {
+            .control-button {
+                padding: 8px 10px;
+                font-size: 0.75rem; /* text-xs */
+                min-width: 80px;
+            }
+            .main-card {
+                padding: 16px;
+                margin: 10px;
+            }
+            .flex-wrap > * {
+                flex-basis: calc(33.333% - 8px); /* Three buttons per row */
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-card">
+        <h1 class="text-3xl font-bold text-center mb-6 text-blue-400">Real-Time Facial Expression Analyzer</h1>
+        
+        <div id="status-message" class="message-box text-center text-sm">
+            Initializing application...
+        </div>
+
+        <div id="webcam-container" class="relative">
+            <!-- Video element for live feed -->
+            <video id="video" width="640" height="480" autoplay playsinline muted class="rounded-lg" style="display: none;"></video>
+            <!-- Image element for static analysis -->
+            <img id="static-image" class="rounded-lg" style="display: none;">
+            <!-- Canvas must be positioned correctly over the video/image -->
+            <canvas id="overlay-canvas" width="640" height="480" class="rounded-lg"></canvas>
+        </div>
+
+        <div class="flex flex-wrap justify-center gap-2 mt-4">
+            <button id="start-webcam-btn" class="control-button bg-green-600 hover:bg-green-700 text-white disabled:opacity-50">
+                Start Webcam
+            </button>
+            <button id="stop-btn" class="control-button bg-red-600 hover:bg-red-700 text-white disabled:opacity-50" disabled>
+                Stop Detection
+            </button>
+            <button id="toggle-display-btn" class="control-button bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50" disabled>
+                Show All Expressions
+            </button>
+            <button id="toggle-landmarks-btn" class="control-button bg-yellow-600 hover:bg-yellow-700 text-white disabled:opacity-50" disabled>
+                Toggle Landmarks
+            </button>
+        </div>
+
+        <div class="flex justify-center mt-3">
+            <label for="image-upload" id="upload-label" class="control-button bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 text-center cursor-pointer w-full max-w-sm">
+                Upload Image / Detect from Screen
+            </label>
+            <input type="file" id="image-upload" accept="image/*" class="hidden">
+        </div>
+        
+        <div id="expression-results" class="message-box mt-4 hidden">
+            <h2 class="text-xl font-semibold mb-2 text-white">Live Expression Data</h2>
+            <!-- Dynamic bars will be inserted here -->
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const imageEl = document.getElementById('static-image');
+        const canvas = document.getElementById('overlay-canvas');
+        const ctx = canvas.getContext('2d');
+        const statusMessage = document.getElementById('status-message');
+        const startWebcamBtn = document.getElementById('start-webcam-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const toggleDisplayBtn = document.getElementById('toggle-display-btn');
+        const toggleLandmarksBtn = document.getElementById('toggle-landmarks-btn');
+        const imageUpload = document.getElementById('image-upload');
+        const uploadLabel = document.getElementById('upload-label');
+        const resultsContainer = document.getElementById('expression-results');
+        
+        // --- Configuration & State ---
+        const MODEL_URL = './models';
+        const DETECTION_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+            inputSize: 160,
+            scoreThreshold: 0.5
+        });
+        
+        let modelsLoaded = false;
+        let detectionInterval = null;
+        let showAllExpressions = false; 
+        let showLandmarks = false;
+        let activeStream = null; 
+        let currentMediaType = 'none'; 
+
+        const EXPRESSION_EMOJIS = {
+            neutral: '😐',
+            happy: '😄',
+            sad: '😥',
+            angry: '😠',
+            fearful: '😨',
+            disgusted: '🤢',
+            surprised: '😮'
+        };
+
+        // --- Utility Functions for UI/UX ---
+
+        function updateStatus(message, type = 'info') {
+            let colorClass = 'text-yellow-400';
+            if (type === 'success') colorClass = 'text-green-400';
+            if (type === 'error') colorClass = 'text-red-500';
+            
+            statusMessage.innerHTML = message;
+            statusMessage.classList.remove('text-yellow-400', 'text-green-400', 'text-red-500', 'text-white');
+            statusMessage.classList.add(colorClass);
+        }
+
+        function setControlsState(isDetecting, isWebcamActive = false) {
+            startWebcamBtn.disabled = isDetecting || !modelsLoaded || isWebcamActive;
+            stopBtn.disabled = !isDetecting && !isWebcamActive;
+            toggleDisplayBtn.disabled = !modelsLoaded;
+            toggleLandmarksBtn.disabled = !modelsLoaded;
+
+            // Disable image upload while detection is running
+            uploadLabel.style.opacity = (isDetecting || isWebcamActive) ? 0.5 : 1;
+            uploadLabel.style.pointerEvents = (isDetecting || isWebcamActive) ? 'none' : 'auto';
+        }
+        
+        function resetMediaElements() {
+            if (activeStream) {
+                activeStream.getTracks().forEach(track => track.stop());
+                activeStream = null;
+            }
+            video.style.display = 'none';
+            imageEl.style.display = 'none';
+            canvas.style.display = 'none';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            resultsContainer.classList.add('hidden');
+            currentMediaType = 'none';
+        }
+
+        function toggleDisplayMode() {
+            showAllExpressions = !showAllExpressions;
+            toggleDisplayBtn.textContent = showAllExpressions ? 'Show Dominant Only' : 'Show All Expressions';
+            // Only toggle the results container if we have something to show
+            const isVisible = showAllExpressions || (currentMediaType === 'image' && modelsLoaded);
+            resultsContainer.classList.toggle('hidden', !isVisible);
+        }
+
+        function toggleLandmarks() {
+            showLandmarks = !showLandmarks;
+            toggleLandmarksBtn.textContent = showLandmarks ? 'Hide Landmarks' : 'Toggle Landmarks';
+        }
+
+        // --- Initialization and Model Loading ---
+
+        async function loadModels() {
+            updateStatus("Loading AI models... Please wait (requires age_gender_model files).", 'info');
+            
+            try {
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
+                    faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL) 
+                ]);
+                modelsLoaded = true;
+                updateStatus("Models loaded successfully. Click 'Start Webcam' or 'Upload Image'.", 'success');
+                setControlsState(false, false);
+            } catch (error) {
+                console.error("CRITICAL ERROR: Failed to load models. Check if all files (including age/gender) are in the /models folder.", error);
+                updateStatus("CRITICAL ERROR: Failed to load models. Check console and ensure **age_gender_model** files are present.", 'error');
+            }
+        }
+
+        // --- Webcam Stream Setup ---
+
+        function startWebcam() {
+            if (!modelsLoaded) return;
+            stopDetectionLoop(); 
+            resetMediaElements();
+            
+            currentMediaType = 'video';
+            startWebcamBtn.disabled = true;
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    activeStream = stream;
+                    video.srcObject = stream;
+                    video.style.display = 'block';
+                    canvas.style.display = 'block';
+                    
+                    video.addEventListener('loadedmetadata', () => {
+                        // Match canvas size to video size
+                        const displaySize = { width: video.offsetWidth, height: video.offsetHeight };
+                        canvas.width = displaySize.width;
+                        canvas.height = displaySize.height;
+                        faceapi.matchDimensions(canvas, displaySize);
+                        
+                        video.play();
+                        startDetectionLoop(); 
+                        setControlsState(true, true);
+                        updateStatus("Webcam active. Real-time analysis running.", 'success');
+                    }, { once: true });
+                })
+                .catch(error => {
+                    console.error("Error accessing webcam:", error);
+                    updateStatus("ERROR: Could not access webcam. Please ensure permissions are granted.", 'error');
+                    setControlsState(false, false);
+                    startWebcamBtn.disabled = false;
+                });
+        }
+        
+        // --- Image Loading and Detection ---
+        
+        imageUpload.addEventListener('change', async (event) => {
+            if (!modelsLoaded || !event.target.files.length) return;
+            
+            stopDetectionLoop(); 
+            resetMediaElements();
+            currentMediaType = 'image';
+            setControlsState(true, false);
+            startWebcamBtn.disabled = true;
+            stopBtn.disabled = false;
+            
+            updateStatus("Loading and analyzing static image...", 'info');
+
+            const file = event.target.files[0];
+            const url = URL.createObjectURL(file);
+            imageEl.src = url;
+            imageEl.style.display = 'block';
+            canvas.style.display = 'block';
+            
+            imageEl.onload = async () => {
+                // Set canvas size to match the image display size
+                const displaySize = { width: imageEl.offsetWidth, height: imageEl.offsetHeight };
+                canvas.width = displaySize.width;
+                canvas.height = displaySize.height;
+                faceapi.matchDimensions(canvas, displaySize);
+
+                // Run detection once on the static image
+                await detectStaticImage();
+            };
+        });
+
+        async function detectStaticImage() {
+            try {
+                // Input is the image element itself
+                const results = await faceapi.detectAllFaces(
+                    imageEl, 
+                    DETECTION_OPTIONS
+                )
+                .withFaceLandmarks()
+                .withFaceExpressions()
+                .withAgeAndGender(); 
+                
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                const displaySize = { width: imageEl.offsetWidth, height: imageEl.offsetHeight };
+                // CRITICAL FIX 1: Resize the results before rendering
+                const resizedResults = faceapi.resizeResults(results, displaySize);
+
+                if (resizedResults.length > 0) {
+                    renderResults(resizedResults, 'image');
+                    updateStatus(`Analysis complete. Detected ${resizedResults.length} face(s).`, 'success');
+                } else {
+                    updateStatus("Analysis failed: No face detected in the image. Ensure the face is clearly visible.", 'error');
+                    resultsContainer.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error("Error during image detection:", error);
+                updateStatus("An error occurred during image processing.", 'error');
+            } finally {
+                setControlsState(false, false); 
+                stopBtn.disabled = false;
+                startWebcamBtn.disabled = false;
+            }
+        }
+        
+        // --- Core Detection & Drawing ---
+
+        function renderExpressionData(expressions) {
+            resultsContainer.innerHTML = `<h2 class="text-xl font-semibold mb-2 text-white">Live Expression Data</h2>`;
+            
+            const sortedExpressions = Object.entries(expressions)
+                .sort(([, a], [, b]) => b - a);
+
+            sortedExpressions.forEach(([expression, probability]) => {
+                const percentage = (probability * 100).toFixed(1);
+                const emoji = EXPRESSION_EMOJIS[expression] || '❓';
+                const capitalizedExpression = expression.charAt(0).toUpperCase() + expression.slice(1);
+
+                let barColor = 'bg-gray-500';
+                if (probability > 0.6) barColor = 'bg-green-500';
+                else if (probability > 0.3) barColor = 'bg-yellow-500';
+                else barColor = 'bg-blue-500';
+
+                const html = `
+                    <div class="mb-2">
+                        <div class="flex justify-between text-sm">
+                            <span class="font-medium">${emoji} ${capitalizedExpression}</span>
+                            <span class="font-mono">${percentage}%</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar ${barColor}" style="width: ${percentage}%;"></div>
+                        </div>
+                    </div>
+                `;
+                resultsContainer.innerHTML += html;
+            });
+            resultsContainer.classList.remove('hidden');
+        }
+
+        function renderResults(detections, source) {
+            if (detections.length === 0) return;
+            
+            // Use the first detected face for display
+            const detection = detections[0];
+            
+            // CRITICAL FIX 2: Check if detection object has the required properties before accessing
+            if (!detection || !detection.detection || !detection.expressions) return;
+
+            const box = detection.detection.box;
+            const expressions = detection.expressions;
+            const age = detection.age ? Math.round(detection.age) : 'N/A';
+            const gender = detection.gender ? detection.gender.charAt(0).toUpperCase() + detection.gender.slice(1) : 'N/A';
+
+            // Find the dominant expression
+            let dominant = { expression: 'neutral', probability: 0 };
+            for (const key in expressions) {
+                if (expressions[key] > dominant.probability) {
+                    dominant.expression = key;
+                    dominant.probability = expressions[key];
+                }
+            }
+            
+            // --- 1. Manually Draw the Bounding Box ---
+            ctx.strokeStyle = '#FFD700'; // Gold color for visibility
+            ctx.lineWidth = 3;
+            ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+            // 2. Draw the Labels (Expression and Age/Gender)
+            const emoji = EXPRESSION_EMOJIS[dominant.expression] || '❓';
+            const capitalizedExpression = dominant.expression.charAt(0).toUpperCase() + dominant.expression.slice(1);
+            
+            // First Line: Expression
+            const expLabel = `${emoji} ${capitalizedExpression} (${(dominant.probability * 100).toFixed(0)}%)`;
+            
+            // Second Line: Age and Gender
+            const ageGenderLabel = `🧑 ${gender} (${age})`;
+
+            // Font size calculation (single size for both lines)
+            const fontSize = Math.max(16, Math.min(24, box.height / 7));
+            ctx.font = `600 ${fontSize}px Inter, sans-serif`; 
+            
+            // Measure widths to determine required background box size
+            const expWidth = ctx.measureText(expLabel).width;
+            const ageGenderWidth = ctx.measureText(ageGenderLabel).width;
+            const textWidth = Math.max(expWidth, ageGenderWidth);
+            
+            // Position the label above the bounding box
+            const textX = box.x;
+            const textY_Exp = box.y; // Top of the box is the base for expression label
+            
+            // Draw Backgrounds
+            const bgColorExp = dominant.expression === 'happy' ? 'rgba(76, 175, 80, 0.9)' : 'rgba(255, 152, 0, 0.9)'; 
+            const bgColorAG = 'rgba(64, 64, 64, 0.9)'; // Dark gray for Age/Gender
+
+            // Draw background rectangle for Expression (Top label)
+            ctx.fillStyle = bgColorExp;
+            // Draw the first background (Expression)
+            ctx.fillRect(textX - 1, textY_Exp - fontSize - 18, textWidth + 12, fontSize + 16);
+            
+            // Draw background rectangle for Age/Gender (Bottom label)
+            ctx.fillStyle = bgColorAG;
+            // Draw the second background, positioned right below the first. 
+            ctx.fillRect(textX - 1, textY_Exp - 1, textWidth + 12, fontSize + 16);
+            
+            // Draw Text (Expression - Top)
+            ctx.fillStyle = '#ffffff'; 
+            ctx.fillText(expLabel, textX + 5, textY_Exp - 14);
+
+            // Draw Text (Age/Gender - Bottom)
+            ctx.fillStyle = '#ffffff'; 
+            ctx.fillText(ageGenderLabel, textX + 5, textY_Exp + fontSize + 1);
+
+
+            // 3. Draw Landmarks (Optional Feature)
+            if (showLandmarks) {
+                faceapi.draw.drawFaceLandmarks(canvas, detection);
+            }
+
+            // 4. Render all expressions below the video if the toggle is active
+            if (showAllExpressions || source === 'image') {
+                renderExpressionData(expressions);
+            }
+        }
+
+        async function detectFacesLoop() {
+            if (currentMediaType !== 'video' || video.readyState < 2) {
+                return;
+            }
+            
+            // CRITICAL FIX: Ensure canvas dimensions match the video element's current size on every loop
+            const displaySize = { width: video.offsetWidth, height: video.offsetHeight };
+            if (canvas.width !== displaySize.width || canvas.height !== displaySize.height) {
+                canvas.width = displaySize.width;
+                canvas.height = displaySize.height;
+                faceapi.matchDimensions(canvas, displaySize);
+            }
+            
+            const detections = await faceapi.detectAllFaces(
+                video, 
+                DETECTION_OPTIONS
+            )
+            .withFaceLandmarks()
+            .withFaceExpressions()
+            .withAgeAndGender();
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (detections.length > 0) {
+                 // CRITICAL FIX: Resize the results before rendering for live video
+                 const resizedResults = faceapi.resizeResults(detections, displaySize);
+                 renderResults(resizedResults, 'video');
+            } else {
+                // No face detected - clear canvas and status bar if showing all
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (showAllExpressions) {
+                    resultsContainer.innerHTML = `<h2 class="text-xl font-semibold mb-2 text-white">Live Expression Data</h2><p class="text-yellow-500">No face detected in the frame.</p>`;
+                    resultsContainer.classList.remove('hidden');
+                } else {
+                    resultsContainer.classList.add('hidden');
+                }
+            }
+        }
+        
+        // --- Control Functions ---
+        
+        function startDetectionLoop() {
+            if (detectionInterval) clearInterval(detectionInterval);
+            
+            updateStatus("Detection started. Look into the camera!", 'info');
+            setControlsState(true, currentMediaType === 'video');
+            
+            // CRITICAL OPTIMIZATION: Use a stable interval for performance
+            detectionInterval = setInterval(detectFacesLoop, 150); 
+        }
+
+        function stopDetectionLoop() {
+            if (detectionInterval) {
+                clearInterval(detectionInterval);
+                detectionInterval = null;
+            }
+            
+            // Reset everything
+            resetMediaElements();
+            updateStatus("Detection stopped. Ready to start webcam or upload image.", 'info');
+            setControlsState(false, false);
+            
+            // Re-enable the Start Webcam button here.
+            startWebcamBtn.disabled = false;
+        }
+        
+        // --- Event Listeners ---
+        startWebcamBtn.addEventListener('click', startWebcam);
+        stopBtn.addEventListener('click', stopDetectionLoop);
+        toggleDisplayBtn.addEventListener('click', toggleDisplayMode);
+        toggleLandmarksBtn.addEventListener('click', toggleLandmarks);
+
+        // --- Initial Load ---
+        loadModels().then(() => {
+            // Once models are loaded, enable the Start Webcam and Upload Image
+            startWebcamBtn.disabled = false;
+            uploadLabel.style.opacity = 1;
+            uploadLabel.style.pointerEvents = 'auto';
+        });
+    </script>
+</body>
+</html>
